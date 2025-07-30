@@ -284,6 +284,80 @@ class TeamAssociationSystem:
         
         return best_match
 
+def normalizar_json_api_football(raw_data) -> List[Dict]:
+    """
+    Normaliza diferentes estructuras de JSON de API Football
+    
+    Maneja estos formatos:
+    1. Array directo: [{"id": 1, "name": "Team"}, ...]
+    2. Con response: {"response": [{"team": {"id": 1, "name": "Team"}}, ...]}
+    3. Con response directo: {"response": [{"id": 1, "name": "Team"}, ...]}
+    4. Objeto con teams: {"teams": [...]}
+    """
+    
+    try:
+        # Caso 1: Si es un string, parsearlo
+        if isinstance(raw_data, str):
+            raw_data = json.loads(raw_data)
+        
+        teams_data = []
+        
+        # Caso 2: Si tiene clave "response" (formato API Football estándar)
+        if isinstance(raw_data, dict) and "response" in raw_data:
+            teams_data = raw_data["response"]
+            
+        # Caso 3: Si tiene clave "teams" 
+        elif isinstance(raw_data, dict) and "teams" in raw_data:
+            teams_data = raw_data["teams"]
+            
+        # Caso 4: Si es directamente un array
+        elif isinstance(raw_data, list):
+            teams_data = raw_data
+            
+        # Caso 5: Si es un diccionario con datos directos
+        elif isinstance(raw_data, dict) and "id" in raw_data:
+            teams_data = [raw_data]
+            
+        else:
+            # Intentar encontrar la lista más grande en el JSON
+            if isinstance(raw_data, dict):
+                for key, value in raw_data.items():
+                    if isinstance(value, list) and len(value) > len(teams_data):
+                        teams_data = value
+        
+        # Normalizar cada equipo
+        normalized_teams = []
+        
+        for item in teams_data:
+            # Si el item tiene una estructura {"team": {...}}
+            if isinstance(item, dict) and "team" in item:
+                team_data = item["team"]
+            # Si el item es directamente los datos del equipo
+            elif isinstance(item, dict):
+                team_data = item
+            else:
+                continue
+            
+            # Crear estructura normalizada
+            normalized_team = {
+                "id": team_data.get("id"),
+                "name": team_data.get("name", ""),
+                "code": team_data.get("code", ""),
+                "country": team_data.get("country", ""),
+                "founded": team_data.get("founded"),
+                "logo": team_data.get("logo", "")
+            }
+            
+            # Solo agregar si tiene al menos ID y nombre
+            if normalized_team["id"] and normalized_team["name"]:
+                normalized_teams.append(normalized_team)
+        
+        return normalized_teams
+        
+    except Exception as e:
+        st.error(f"Error normalizando JSON: {str(e)}")
+        return []
+
 def crear_datos_equipos_ejemplo():
     """Crea datos de ejemplo para demostración"""
     return [
@@ -381,20 +455,51 @@ def extraer_equipos_del_excel(df: pd.DataFrame) -> List[str]:
 def procesar_equipos(teams_list: List[str], api_teams: List[Dict]) -> Dict:
     """Procesa la lista de equipos y encuentra coincidencias"""
     
+    # Validar que api_teams tenga la estructura correcta
+    if not api_teams:
+        st.error("❌ No hay datos de equipos para procesar")
+        return {}
+    
+    # Verificar estructura del primer equipo
+    if api_teams and isinstance(api_teams[0], dict):
+        sample_team = api_teams[0]
+        required_keys = ['id', 'name']
+        missing_keys = [key for key in required_keys if key not in sample_team]
+        
+        if missing_keys:
+            st.error(f"❌ Estructura de JSON incorrecta. Faltan claves: {missing_keys}")
+            st.write("**Estructura esperada:**")
+            st.json({"id": 123, "name": "Nombre del equipo", "code": "COD", "country": "País"})
+            st.write("**Estructura encontrada:**")
+            st.json(sample_team)
+            return {}
+    
     association_system = TeamAssociationSystem()
     results = {}
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    for i, team in enumerate(teams_list):
-        status_text.text(f"Procesando: {team}")
-        match = association_system.find_best_match(team, api_teams)
-        results[team] = match
-        progress_bar.progress((i + 1) / len(teams_list))
-    
-    status_text.text("✅ Procesamiento completado")
-    return results
+    try:
+        for i, team in enumerate(teams_list):
+            status_text.text(f"Procesando: {team}")
+            
+            try:
+                match = association_system.find_best_match(team, api_teams)
+                results[team] = match
+            except Exception as e:
+                st.warning(f"⚠️ Error procesando equipo '{team}': {str(e)}")
+                results[team] = None
+            
+            progress_bar.progress((i + 1) / len(teams_list))
+        
+        status_text.text("✅ Procesamiento completado")
+        return results
+        
+    except Exception as e:
+        status_text.text(f"❌ Error en procesamiento: {str(e)}")
+        st.error(f"Error general en procesamiento: {str(e)}")
+        return results
 
 def generar_reporte(results: Dict) -> Dict:
     """Genera reporte de resultados"""
@@ -505,8 +610,13 @@ def main():
     
     # Configurar fuente de datos
     if data_source == "📄 Usar datos de ejemplo (demo)":
-        st.sidebar.success("✅ Usando datos de ejemplo")
-        api_teams = crear_datos_equipos_ejemplo()
+        if 'api_teams' not in st.session_state or len(st.session_state.get('api_teams', [])) < 20:
+            st.sidebar.success("✅ Usando datos de ejemplo")
+            api_teams = crear_datos_equipos_ejemplo()
+            st.session_state['api_teams'] = api_teams
+        else:
+            api_teams = st.session_state['api_teams']
+            st.sidebar.success("✅ Datos de ejemplo cargados")
         
     elif data_source == "🌐 Conectar a API Football":
         api_key = st.sidebar.text_input(
@@ -557,17 +667,49 @@ def main():
         
         if uploaded_json:
             try:
-                api_teams = json.load(uploaded_json)
-                st.sidebar.success(f"✅ {len(api_teams)} equipos cargados desde JSON")
+                raw_data = json.load(uploaded_json)
+                
+                # Mostrar información de debug sobre la estructura
+                st.sidebar.write("🔍 **Analizando estructura del JSON...**")
+                
+                # Detectar y normalizar diferentes estructuras de JSON
+                api_teams = normalizar_json_api_football(raw_data)
+                
+                if api_teams:
+                    st.session_state['api_teams'] = api_teams
+                    st.sidebar.success(f"✅ {len(api_teams)} equipos procesados desde JSON")
+                    
+                    # Mostrar muestra de los primeros equipos
+                    with st.sidebar.expander("👁️ Ver muestra de equipos"):
+                        for i, team in enumerate(api_teams[:3]):
+                            st.sidebar.write(f"**{i+1}.** {team.get('name', 'Sin nombre')} (ID: {team.get('id', 'N/A')})")
+                else:
+                    st.sidebar.error("❌ No se pudieron extraer equipos del JSON")
+                    
+            except json.JSONDecodeError as e:
+                st.sidebar.error(f"❌ Error al leer JSON: Archivo no válido")
             except Exception as e:
-                st.sidebar.error(f"❌ Error al cargar JSON: {str(e)}")
+                st.sidebar.error(f"❌ Error al procesar JSON: {str(e)}")
+                # Mostrar más detalles del error
+                st.sidebar.write("📝 **Detalles del error:**")
+                st.sidebar.code(str(e))
+        
+        # Usar equipos cargados previamente
+        if 'api_teams' in st.session_state:
+            api_teams = st.session_state['api_teams']
     
     # Sección principal
     st.header("📊 Procesar Archivo Excel")
     
-    if not api_teams:
+    # Verificar si tenemos datos de equipos (ya sea en variable local o en session_state)
+    if not api_teams and 'api_teams' not in st.session_state:
         st.warning("⚠️ Primero configura la fuente de datos de equipos en el panel lateral")
         return
+    
+    # Si no tenemos api_teams local pero sí en session_state, usarlos
+    if not api_teams and 'api_teams' in st.session_state:
+        api_teams = st.session_state['api_teams']
+        st.info(f"📊 Usando datos cargados: {len(api_teams)} equipos disponibles")
     
     # Subir archivo Excel
     uploaded_file = st.file_uploader(
@@ -602,106 +744,137 @@ def main():
             
             # Botón para procesar
             if st.button("🚀 Procesar Equipos", type="primary"):
-                with st.spinner("Procesando equipos..."):
-                    # Procesar equipos
-                    results = procesar_equipos(teams_list, api_teams)
-                    
-                    # Generar reporte
-                    report = generar_reporte(results)
-                    
-                    # Mostrar resultados
-                    st.header("📈 Resultados del Procesamiento")
-                    
-                    # Métricas
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        st.metric(
-                            "✅ Exitosos",
-                            len(report['successful_matches']),
-                            f"{len(report['successful_matches'])/len(teams_list)*100:.1f}%"
-                        )
-                    
-                    with col2:
-                        st.metric(
-                            "⚠️ Baja Confianza",
-                            len(report['low_confidence_matches']),
-                            f"{len(report['low_confidence_matches'])/len(teams_list)*100:.1f}%"
-                        )
-                    
-                    with col3:
-                        st.metric(
-                            "❌ Sin Coincidencias",
-                            len(report['no_matches']),
-                            f"{len(report['no_matches'])/len(teams_list)*100:.1f}%"
-                        )
-                    
-                    with col4:
-                        st.metric(
-                            "📊 Total Equipos",
-                            len(teams_list)
-                        )
-                    
-                    # Coincidencias exitosas
-                    if report['successful_matches']:
-                        st.subheader("✅ Coincidencias Exitosas")
-                        successful_df = pd.DataFrame(report['successful_matches'])
-                        st.dataframe(successful_df, use_container_width=True)
-                    
-                    # Coincidencias de baja confianza
-                    if report['low_confidence_matches']:
-                        st.subheader("⚠️ Coincidencias de Baja Confianza (Revisar)")
-                        low_conf_df = pd.DataFrame(report['low_confidence_matches'])
-                        st.dataframe(low_conf_df, use_container_width=True)
+                
+                # Verificar que tenemos datos válidos
+                if not api_teams:
+                    st.error("❌ No hay datos de equipos cargados. Configura la fuente de datos primero.")
+                    return
+                
+                # Mostrar información sobre los datos que vamos a usar
+                st.info(f"📊 **Datos a procesar:**\n- Equipos en Excel: **{len(teams_list)}**\n- Equipos en base de datos: **{len(api_teams)}**")
+                
+                try:
+                    with st.spinner("Procesando equipos..."):
+                        # Procesar equipos
+                        results = procesar_equipos(teams_list, api_teams)
                         
-                        st.markdown("""
-                        <div class="warning-box">
-                        <strong>⚠️ Atención:</strong> Estas coincidencias tienen baja confianza. 
-                        Revísalas manualmente antes de usar los IDs.
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    # Sin coincidencias
-                    if report['no_matches']:
-                        st.subheader("❌ Equipos Sin Coincidencias")
-                        st.write("Estos equipos no pudieron ser asociados automáticamente:")
+                        if not results:
+                            st.error("❌ No se pudieron procesar los equipos. Revisa la estructura de tus datos.")
+                            return
                         
-                        cols = st.columns(3)
-                        for i, team in enumerate(report['no_matches']):
-                            cols[i % 3].write(f"• {team}")
+                        # Generar reporte
+                        report = generar_reporte(results)
+                        
+                        # Mostrar resultados
+                        st.header("📈 Resultados del Procesamiento")
+                        
+                        # Métricas
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        with col1:
+                            st.metric(
+                                "✅ Exitosos",
+                                len(report['successful_matches']),
+                                f"{len(report['successful_matches'])/len(teams_list)*100:.1f}%"
+                            )
+                        
+                        with col2:
+                            st.metric(
+                                "⚠️ Baja Confianza",
+                                len(report['low_confidence_matches']),
+                                f"{len(report['low_confidence_matches'])/len(teams_list)*100:.1f}%"
+                            )
+                        
+                        with col3:
+                            st.metric(
+                                "❌ Sin Coincidencias",
+                                len(report['no_matches']),
+                                f"{len(report['no_matches'])/len(teams_list)*100:.1f}%"
+                            )
+                        
+                        with col4:
+                            st.metric(
+                                "📊 Total Equipos",
+                                len(teams_list)
+                            )
+                        
+                        # Coincidencias exitosas
+                        if report['successful_matches']:
+                            st.subheader("✅ Coincidencias Exitosas")
+                            successful_df = pd.DataFrame(report['successful_matches'])
+                            st.dataframe(successful_df, use_container_width=True)
+                        
+                        # Coincidencias de baja confianza
+                        if report['low_confidence_matches']:
+                            st.subheader("⚠️ Coincidencias de Baja Confianza (Revisar)")
+                            low_conf_df = pd.DataFrame(report['low_confidence_matches'])
+                            st.dataframe(low_conf_df, use_container_width=True)
+                            
+                            st.markdown("""
+                            <div class="warning-box">
+                            <strong>⚠️ Atención:</strong> Estas coincidencias tienen baja confianza. 
+                            Revísalas manualmente antes de usar los IDs.
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        # Sin coincidencias
+                        if report['no_matches']:
+                            st.subheader("❌ Equipos Sin Coincidencias")
+                            st.write("Estos equipos no pudieron ser asociados automáticamente:")
+                            
+                            cols = st.columns(3)
+                            for i, team in enumerate(report['no_matches']):
+                                cols[i % 3].write(f"• {team}")
+                        
+                        # Crear y descargar archivo Excel
+                        st.header("💾 Descargar Resultados")
+                        
+                        try:
+                            excel_data = crear_excel_con_ids(df, results)
+                            
+                            st.download_button(
+                                label="📥 Descargar Excel con IDs",
+                                data=excel_data,
+                                file_name="equipos_con_api_ids.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                            
+                            # Descargar resultados JSON
+                            results_json = json.dumps(results, indent=2, ensure_ascii=False)
+                            st.download_button(
+                                label="📥 Descargar Resultados JSON",
+                                data=results_json,
+                                file_name="resultados_asociacion.json",
+                                mime="application/json"
+                            )
+                            
+                            st.markdown("""
+                            <div class="success-box">
+                            <h4>🎉 ¡Procesamiento Completado!</h4>
+                            <p>Descarga el archivo Excel para ver tus datos originales con las nuevas columnas de IDs de API Football.</p>
+                            <p>El archivo incluye dos hojas:</p>
+                            <ul>
+                                <li><strong>Datos_con_IDs:</strong> Tus datos originales + columnas de IDs</li>
+                                <li><strong>Mapeo_Equipos:</strong> Tabla completa de asociaciones</li>
+                            </ul>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                        except Exception as e:
+                            st.error(f"❌ Error creando archivo Excel: {str(e)}")
+                
+                except Exception as e:
+                    st.error(f"❌ Error durante el procesamiento: {str(e)}")
+                    st.write("**Detalles del error:**")
+                    st.code(str(e))
                     
-                    # Crear y descargar archivo Excel
-                    st.header("💾 Descargar Resultados")
-                    
-                    excel_data = crear_excel_con_ids(df, results)
-                    
-                    st.download_button(
-                        label="📥 Descargar Excel con IDs",
-                        data=excel_data,
-                        file_name="equipos_con_api_ids.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                    
-                    # Descargar resultados JSON
-                    results_json = json.dumps(results, indent=2, ensure_ascii=False)
-                    st.download_button(
-                        label="📥 Descargar Resultados JSON",
-                        data=results_json,
-                        file_name="resultados_asociacion.json",
-                        mime="application/json"
-                    )
-                    
-                    st.markdown("""
-                    <div class="success-box">
-                    <h4>🎉 ¡Procesamiento Completado!</h4>
-                    <p>Descarga el archivo Excel para ver tus datos originales con las nuevas columnas de IDs de API Football.</p>
-                    <p>El archivo incluye dos hojas:</p>
-                    <ul>
-                        <li><strong>Datos_con_IDs:</strong> Tus datos originales + columnas de IDs</li>
-                        <li><strong>Mapeo_Equipos:</strong> Tabla completa de asociaciones</li>
-                    </ul>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    # Información de debug
+                    with st.expander("🔍 Información de Debug"):
+                        st.write("**Tipo de api_teams:**", type(api_teams))
+                        st.write("**Cantidad de equipos:**", len(api_teams) if api_teams else 0)
+                        if api_teams and len(api_teams) > 0:
+                            st.write("**Estructura del primer equipo:**")
+                            st.json(api_teams[0])
         
         except Exception as e:
             st.error(f"❌ Error al procesar el archivo: {str(e)}")
