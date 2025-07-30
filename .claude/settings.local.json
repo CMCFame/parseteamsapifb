@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(streamlit --version)",
+      "Bash(python test_improvements.py:*)",
+      "Bash(python test:*)",
+      "Bash(python:*)",
+      "Bash(streamlit run:*)",
+      "Bash(pip install:*)"
+    ],
+    "deny": []
+  }
+}

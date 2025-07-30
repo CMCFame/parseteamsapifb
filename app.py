@@ -8,6 +8,8 @@ from difflib import SequenceMatcher
 from typing import Dict, List, Optional
 import io
 import base64
+import os
+from pathlib import Path
 
 # Configuración de la página
 st.set_page_config(
@@ -235,8 +237,8 @@ class TeamAssociationSystem:
         norm2 = self.normalize_name(team2)
         return SequenceMatcher(None, norm1, norm2).ratio()
     
-    def find_best_match(self, team_name: str, api_teams: List[Dict]) -> Optional[Dict]:
-        """Encuentra la mejor coincidencia"""
+    def find_best_match(self, team_name: str, api_teams: List[Dict], context: List[Dict] = None) -> Optional[Dict]:
+        """Encuentra la mejor coincidencia usando información contextual"""
         
         # 1. Revisar mapeo manual primero
         if team_name in self.manual_mappings:
@@ -249,9 +251,8 @@ class TeamAssociationSystem:
                         'method': 'manual_mapping'
                     }
         
-        # 2. Búsqueda por similaridad
-        best_match = None
-        best_score = 0
+        # 2. Búsqueda mejorada con contexto
+        candidates = []
         
         for api_team in api_teams:
             api_name = api_team.get('name', '')
@@ -264,7 +265,7 @@ class TeamAssociationSystem:
                     'method': 'exact_match'
                 }
             
-            # Similaridad de cadena
+            # Calcular similaridad base
             similarity = self.calculate_similarity(team_name, api_name)
             
             # Coincidencia de contenido
@@ -272,17 +273,69 @@ class TeamAssociationSystem:
             norm_api = self.normalize_name(api_name)
             
             if norm_team in norm_api or norm_api in norm_team:
-                similarity += 0.3
+                similarity += 0.2
             
-            if similarity > best_score and similarity >= 0.6:
-                best_score = similarity
-                best_match = {
+            # Boost por contexto si está disponible
+            context_boost = 0
+            if context and len(context) > 0:
+                context_boost = self.calculate_context_boost(team_name, api_team, context, api_teams)
+                similarity += context_boost
+            
+            if similarity >= 0.5:  # Umbral más bajo para considerar candidatos
+                candidates.append({
                     'api_team': api_team,
                     'confidence': similarity,
-                    'method': 'similarity'
-                }
+                    'context_boost': context_boost,
+                    'method': 'contextual_similarity' if context_boost > 0 else 'similarity'
+                })
         
-        return best_match
+        # Ordenar candidatos por confianza
+        candidates.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # Retornar el mejor candidato si supera el umbral mínimo
+        if candidates and candidates[0]['confidence'] >= 0.6:
+            return candidates[0]
+        
+        return None
+    
+    def calculate_context_boost(self, team_name: str, api_team: Dict, context: List[Dict], all_api_teams: List[Dict]) -> float:
+        """Calcula boost de confianza basado en contexto de partidos"""
+        
+        boost = 0
+        opponent_matches = 0
+        total_opponents = 0
+        
+        for match_info in context:
+            opponent = match_info.get('opponent', '')
+            if not opponent:
+                continue
+                
+            total_opponents += 1
+            
+            # Buscar si el oponente también está en la misma liga/competición
+            opponent_country = None
+            for api_opp in all_api_teams:
+                if (self.normalize_name(opponent) == self.normalize_name(api_opp.get('name', '')) or
+                    self.calculate_similarity(opponent, api_opp.get('name', '')) > 0.8):
+                    opponent_country = api_opp.get('country', '')
+                    break
+            
+            # Si encontramos el país del oponente y coincide con nuestro equipo candidato
+            if opponent_country and opponent_country == api_team.get('country', ''):
+                opponent_matches += 1
+        
+        # Calcular boost basado en coincidencias de país con oponentes
+        if total_opponents > 0:
+            country_match_ratio = opponent_matches / total_opponents
+            boost += country_match_ratio * 0.3  # Máximo boost de 0.3
+        
+        # Boost adicional si hay muchos partidos (más datos = más confianza)
+        if len(context) >= 3:
+            boost += 0.1
+        elif len(context) >= 5:
+            boost += 0.15
+        
+        return min(boost, 0.4)  # Limitar boost máximo
 
 def normalizar_json_api_football(raw_data) -> List[Dict]:
     """
@@ -421,8 +474,8 @@ def obtener_equipos_desde_api(api_key: str, league_ids: List[int]) -> List[Dict]
     """Obtiene equipos desde API Football"""
     
     headers = {
-        'x-rapidapi-host': 'v3.football.api-sports.io',
-        'x-rapidapi-key': api_key
+        'X-RapidAPI-Host': 'v3.football.api-sports.io',
+        'X-RapidAPI-Key': api_key
     }
     
     all_teams = []
@@ -481,7 +534,46 @@ def extraer_equipos_del_excel(df: pd.DataFrame) -> List[str]:
     
     return sorted(list(all_teams))
 
-def procesar_equipos(teams_list: List[str], api_teams: List[Dict]) -> Dict:
+def extraer_contexto_partidos(df: pd.DataFrame) -> Dict[str, List[Dict]]:
+    """Extrae información contextual de los partidos para cada equipo"""
+    
+    team_context = {}
+    
+    for _, row in df.iterrows():
+        local = str(row.get('Local', '')).strip()
+        visitante = str(row.get('Visitante', '')).strip()
+        match_text = str(row.get('Match text', '')).strip()
+        fecha = str(row.get('Fecha', '')).strip()
+        
+        # Crear contexto del partido
+        match_info = {
+            'opponent': visitante if local else local,
+            'match_text': match_text,
+            'fecha': fecha,
+            'is_home': True if local else False
+        }
+        
+        # Agregar contexto para el equipo local
+        if local and local != '':
+            if local not in team_context:
+                team_context[local] = []
+            match_info_local = match_info.copy()
+            match_info_local['opponent'] = visitante
+            match_info_local['is_home'] = True
+            team_context[local].append(match_info_local)
+        
+        # Agregar contexto para el equipo visitante
+        if visitante and visitante != '':
+            if visitante not in team_context:
+                team_context[visitante] = []
+            match_info_visitante = match_info.copy()
+            match_info_visitante['opponent'] = local
+            match_info_visitante['is_home'] = False
+            team_context[visitante].append(match_info_visitante)
+    
+    return team_context
+
+def procesar_equipos(teams_list: List[str], api_teams: List[Dict], team_context: Dict[str, List[Dict]] = None) -> Dict:
     """Procesa la lista de equipos y encuentra coincidencias"""
     
     # Validar que api_teams tenga la estructura correcta
@@ -514,7 +606,8 @@ def procesar_equipos(teams_list: List[str], api_teams: List[Dict]) -> Dict:
             status_text.text(f"Procesando: {team}")
             
             try:
-                match = association_system.find_best_match(team, api_teams)
+                context = team_context.get(team, []) if team_context else []
+                match = association_system.find_best_match(team, api_teams, context)
                 results[team] = match
             except Exception as e:
                 st.warning(f"⚠️ Error procesando equipo '{team}': {str(e)}")
@@ -541,21 +634,29 @@ def generar_reporte(results: Dict) -> Dict:
         if result is None:
             no_matches.append(team_name)
         elif result['confidence'] >= 0.9:
-            successful.append({
+            match_info = {
                 'original': team_name,
                 'matched': result['api_team']['name'],
                 'id': result['api_team']['id'],
                 'confidence': result['confidence'],
-                'method': result['method']
-            })
+                'method': result['method'],
+                'country': result['api_team'].get('country', 'N/A')
+            }
+            if 'context_boost' in result:
+                match_info['context_boost'] = result['context_boost']
+            successful.append(match_info)
         else:
-            low_confidence.append({
+            match_info = {
                 'original': team_name,
                 'matched': result['api_team']['name'],
                 'id': result['api_team']['id'],
                 'confidence': result['confidence'],
-                'method': result['method']
-            })
+                'method': result['method'],
+                'country': result['api_team'].get('country', 'N/A')
+            }
+            if 'context_boost' in result:
+                match_info['context_boost'] = result['context_boost']
+            low_confidence.append(match_info)
     
     return {
         'successful_matches': successful,
@@ -728,29 +829,51 @@ def main():
             api_teams = st.session_state['api_teams']
     
     # Sección principal
-    st.header("📊 Procesar Archivo Excel")
+    st.header("📊 Procesar Archivo CSV/Excel")
     
     # Verificar si tenemos datos de equipos (ya sea en variable local o en session_state)
     if not api_teams and 'api_teams' not in st.session_state:
         st.warning("⚠️ Primero configura la fuente de datos de equipos en el panel lateral")
         return
     
+    # Verificar si existe tashist.csv automáticamente
+    tashist_path = Path('tashist.csv')
+    if tashist_path.exists() and st.button("🎯 Usar archivo tashist.csv automáticamente"):
+        try:
+            df = pd.read_csv(tashist_path)
+            st.success(f"✅ Archivo tashist.csv cargado automáticamente: {len(df)} filas")
+            
+            # Procesar automáticamente
+            uploaded_file = "auto_loaded"
+        except Exception as e:
+            st.error(f"❌ Error cargando tashist.csv: {str(e)}")
+            uploaded_file = None
+    else:
+        uploaded_file = None
+    
     # Si no tenemos api_teams local pero sí en session_state, usarlos
     if not api_teams and 'api_teams' in st.session_state:
         api_teams = st.session_state['api_teams']
         st.info(f"📊 Usando datos cargados: {len(api_teams)} equipos disponibles")
     
-    # Subir archivo Excel
-    uploaded_file = st.file_uploader(
-        "📁 Sube tu archivo Excel con los equipos",
-        type=['xlsx', 'xls'],
-        help="Asegúrate de que tu archivo tenga columnas con nombres de equipos (Local, Visitante, etc.)"
-    )
+    # Subir archivo Excel/CSV si no se cargó automáticamente
+    if not uploaded_file:
+        uploaded_file = st.file_uploader(
+            "📁 Sube tu archivo Excel/CSV con los equipos",
+            type=['xlsx', 'xls', 'csv'],
+            help="Asegúrate de que tu archivo tenga columnas con nombres de equipos (Local, Visitante, etc.)"
+        )
     
     if uploaded_file:
         try:
-            # Leer archivo Excel
-            df = pd.read_excel(uploaded_file, sheet_name=0)
+            # Leer archivo según tipo
+            if uploaded_file == "auto_loaded":
+                # Ya está cargado
+                pass
+            elif uploaded_file.name.endswith('.csv'):
+                df = pd.read_csv(uploaded_file)
+            else:
+                df = pd.read_excel(uploaded_file, sheet_name=0)
             
             st.success(f"✅ Archivo cargado: {len(df)} filas encontradas")
             
@@ -758,10 +881,25 @@ def main():
             with st.expander("👁️ Ver vista previa del archivo"):
                 st.dataframe(df.head(10))
             
-            # Extraer equipos
+            # Extraer equipos y contexto
             teams_list = extraer_equipos_del_excel(df)
+            team_context = extraer_contexto_partidos(df)
             
             st.info(f"🔍 Encontrados **{len(teams_list)}** equipos únicos")
+            
+            # Mostrar información de contexto
+            if team_context:
+                context_info = []
+                for team, matches in team_context.items():
+                    context_info.append(f"{team}: {len(matches)} partidos")
+                
+                with st.expander("🎯 Información contextual extraída"):
+                    st.write(f"**Equipos con contexto:** {len(team_context)}")
+                    st.write("**Partidos por equipo:**")
+                    for info in context_info[:10]:  # Mostrar solo los primeros 10
+                        st.write(f"• {info}")
+                    if len(context_info) > 10:
+                        st.write(f"... y {len(context_info) - 10} equipos más")
             
             # Mostrar algunos equipos encontrados
             with st.expander("📋 Ver equipos encontrados"):
@@ -783,9 +921,9 @@ def main():
                 st.info(f"📊 **Datos a procesar:**\n- Equipos en Excel: **{len(teams_list)}**\n- Equipos en base de datos: **{len(api_teams)}**")
                 
                 try:
-                    with st.spinner("Procesando equipos..."):
-                        # Procesar equipos
-                        results = procesar_equipos(teams_list, api_teams)
+                    with st.spinner("Procesando equipos con información contextual..."):
+                        # Procesar equipos con contexto
+                        results = procesar_equipos(teams_list, api_teams, team_context)
                         
                         if not results:
                             st.error("❌ No se pudieron procesar los equipos. Revisa la estructura de tus datos.")
