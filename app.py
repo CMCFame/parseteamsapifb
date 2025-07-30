@@ -293,6 +293,7 @@ def normalizar_json_api_football(raw_data) -> List[Dict]:
     2. Con response: {"response": [{"team": {"id": 1, "name": "Team"}}, ...]}
     3. Con response directo: {"response": [{"id": 1, "name": "Team"}, ...]}
     4. Objeto con teams: {"teams": [...]}
+    5. Objeto indexado por ID: {"1553": {"id": 1553, "name": "Team"}, "8047": {...}}
     """
     
     try:
@@ -314,16 +315,25 @@ def normalizar_json_api_football(raw_data) -> List[Dict]:
         elif isinstance(raw_data, list):
             teams_data = raw_data
             
-        # Caso 5: Si es un diccionario con datos directos
-        elif isinstance(raw_data, dict) and "id" in raw_data:
-            teams_data = [raw_data]
+        # Caso 5: Objeto indexado por ID (tu formato)
+        elif isinstance(raw_data, dict):
+            # Verificar si parece ser un objeto indexado por IDs
+            # Las claves deberían ser números (como strings) y los valores objetos con "id"
+            sample_keys = list(raw_data.keys())[:5]  # Tomar muestra de claves
             
-        else:
-            # Intentar encontrar la lista más grande en el JSON
-            if isinstance(raw_data, dict):
-                for key, value in raw_data.items():
-                    if isinstance(value, list) and len(value) > len(teams_data):
-                        teams_data = value
+            if sample_keys and all(key.isdigit() for key in sample_keys):
+                # Es un objeto indexado por IDs
+                st.info("🔍 Detectado formato: Objeto indexado por IDs de equipos")
+                teams_data = list(raw_data.values())
+            else:
+                # Caso 6: Si es un diccionario con datos directos
+                if "id" in raw_data:
+                    teams_data = [raw_data]
+                else:
+                    # Intentar encontrar la lista más grande en el JSON
+                    for key, value in raw_data.items():
+                        if isinstance(value, list) and len(value) > len(teams_data):
+                            teams_data = value
         
         # Normalizar cada equipo
         normalized_teams = []
@@ -345,17 +355,36 @@ def normalizar_json_api_football(raw_data) -> List[Dict]:
                 "code": team_data.get("code", ""),
                 "country": team_data.get("country", ""),
                 "founded": team_data.get("founded"),
-                "logo": team_data.get("logo", "")
+                "logo": team_data.get("logo", ""),
+                "national": team_data.get("national", False)
             }
             
             # Solo agregar si tiene al menos ID y nombre
             if normalized_team["id"] and normalized_team["name"]:
                 normalized_teams.append(normalized_team)
         
+        # Mostrar información de debug
+        if normalized_teams:
+            st.success(f"✅ Estructura detectada y normalizada correctamente")
+            st.info(f"📊 {len(normalized_teams)} equipos extraídos del JSON")
+            
+            # Mostrar estadísticas
+            countries = set(team.get("country", "") for team in normalized_teams)
+            national_teams = sum(1 for team in normalized_teams if team.get("national", False))
+            club_teams = len(normalized_teams) - national_teams
+            
+            st.write(f"🌍 **Países representados:** {len(countries)}")
+            st.write(f"🏴 **Selecciones nacionales:** {national_teams}")
+            st.write(f"⚽ **Equipos de clubes:** {club_teams}")
+        
         return normalized_teams
         
     except Exception as e:
         st.error(f"Error normalizando JSON: {str(e)}")
+        st.write("**Información de debug:**")
+        st.write(f"Tipo de datos: {type(raw_data)}")
+        if isinstance(raw_data, dict):
+            st.write(f"Claves principales: {list(raw_data.keys())[:10]}")
         return []
 
 def crear_datos_equipos_ejemplo():
