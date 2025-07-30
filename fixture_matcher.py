@@ -8,6 +8,10 @@ import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import time
+import logging
+
+# Configurar logging para este módulo
+logger = logging.getLogger(__name__)
 
 class FixtureMatcher:
     """Sistema para encontrar equipos usando fixtures específicos de API Football"""
@@ -25,6 +29,7 @@ class FixtureMatcher:
         Extrae información del partido desde el texto
         Ejemplo: "Fecha: 4/4 21:00, Partido: Tijuana vs Necaxa"
         """
+        logger.info(f"Parseando texto: {match_text}")
         try:
             # Patrón para extraer fecha y equipos
             pattern = r"Fecha:\s*(\d+/\d+)\s*(\d+:\d+)?,\s*Partido:\s*(.+?)\s*vs\s*(.+)"
@@ -44,15 +49,17 @@ class FixtureMatcher:
                 else:
                     parsed_date = None
                 
-                return {
+                result = {
                     'date': parsed_date,
                     'time': time_part,
                     'team1': team1,
                     'team2': team2,
                     'original_text': match_text
                 }
+                logger.info(f"Parseo exitoso: {result}")
+                return result
         except Exception as e:
-            print(f"Error parsing match text '{match_text}': {e}")
+            logger.error(f"Error parsing match text '{match_text}': {e}")
         
         return None
     
@@ -78,19 +85,22 @@ class FixtureMatcher:
         querystring = {"date": date}
         
         try:
+            logger.info(f"Buscando fixtures para fecha: {date}")
             response = requests.get(url, headers=self.headers, params=querystring, timeout=10)
+            logger.info(f"Respuesta API: status={response.status_code}")
             
             if response.status_code == 200:
                 data = response.json()
                 fixtures = data.get('response', [])
+                logger.info(f"Fixtures encontrados: {len(fixtures)}")
                 self.cache[cache_key] = fixtures
                 return fixtures
             else:
-                print(f"Error API: {response.status_code} - {response.text}")
+                logger.error(f"Error API: {response.status_code} - {response.text}")
                 return []
                 
         except Exception as e:
-            print(f"Error buscando fixtures por fecha {date}: {e}")
+            logger.error(f"Error buscando fixtures por fecha {date}: {e}")
             return []
     
     def find_matching_fixture(self, match_info: Dict) -> Optional[Dict]:
@@ -105,13 +115,14 @@ class FixtureMatcher:
         target_date = match_info['date']
         
         # Buscar fixtures en la fecha
+        logger.info(f"Buscando fixtures para {target_date} con equipos {team1} vs {team2}")
         fixtures = self.search_fixtures_by_date(target_date)
         
         if not fixtures:
-            print(f"No se encontraron fixtures para la fecha {target_date}")
+            logger.warning(f"No se encontraron fixtures para la fecha {target_date}")
             return None
         
-        print(f"Encontrados {len(fixtures)} fixtures para {target_date}")
+        logger.info(f"Encontrados {len(fixtures)} fixtures para {target_date}")
         
         # Buscar coincidencias por nombre de equipo
         best_match = None
@@ -136,14 +147,19 @@ class FixtureMatcher:
                 if score > best_score:
                     best_score = score
                     best_match = fixture
+                    logger.info(f"Nueva mejor coincidencia: {home_team} vs {away_team} (score: {score})")
                     
             except Exception as e:
-                print(f"Error procesando fixture: {e}")
+                logger.error(f"Error procesando fixture: {e}")
                 continue
         
         if best_match and best_score >= 1:
-            print(f"Fixture encontrado: {best_match.get('teams', {}).get('home', {}).get('name')} vs {best_match.get('teams', {}).get('away', {}).get('name')}")
+            home_name = best_match.get('teams', {}).get('home', {}).get('name')
+            away_name = best_match.get('teams', {}).get('away', {}).get('name')
+            logger.info(f"Fixture encontrado: {home_name} vs {away_name} (score: {best_score})")
             return best_match
+        
+        logger.warning(f"No se encontró fixture válido para {team1} vs {team2}")
         
         return None
     
@@ -156,17 +172,19 @@ class FixtureMatcher:
             away_id = fixture.get('teams', {}).get('away', {}).get('id')
             return home_id, away_id
         except Exception as e:
-            print(f"Error extrayendo IDs de equipos: {e}")
+            logger.error(f"Error extrayendo IDs de equipos: {e}")
             return None, None
     
     def process_match_text(self, match_text: str) -> Dict:
         """
         Procesa un texto de partido completo y retorna información de equipos
         """
+        logger.info(f"=== PROCESANDO MATCH TEXT: {match_text} ===")
         # Parsear información del partido
         match_info = self.parse_match_text(match_text)
         
         if not match_info:
+            logger.error("No se pudo parsear el texto del partido")
             return {
                 'success': False,
                 'error': 'No se pudo parsear el texto del partido',
@@ -177,6 +195,7 @@ class FixtureMatcher:
         fixture = self.find_matching_fixture(match_info)
         
         if not fixture:
+            logger.error("No se encontró fixture correspondiente")
             return {
                 'success': False,
                 'error': 'No se encontró fixture correspondiente',
@@ -187,7 +206,7 @@ class FixtureMatcher:
         # Extraer IDs de equipos
         home_id, away_id = self.extract_team_ids(fixture)
         
-        return {
+        result = {
             'success': True,
             'match_info': match_info,
             'fixture': fixture,
@@ -205,6 +224,8 @@ class FixtureMatcher:
             },
             'original_text': match_text
         }
+        logger.info(f"PROCESAMIENTO EXITOSO: {result['team_ids']['home']['name']} (ID: {home_id}) vs {result['team_ids']['away']['name']} (ID: {away_id})")
+        return result
 
 def test_fixture_matcher():
     """Función de prueba para el FixtureMatcher"""

@@ -6,7 +6,8 @@
       "Bash(python test:*)",
       "Bash(python:*)",
       "Bash(streamlit run:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(start cmd /k:*)"
     ],
     "deny": []
   }

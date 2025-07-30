@@ -1,6 +1,6 @@
 """
 Aplicación Streamlit mejorada que usa fixtures de API Football
-para obtener IDs de equipos de manera precisa
+para obtener IDs de equipos de manera precisa - VERSIÓN CORREGIDA
 """
 
 import streamlit as st
@@ -11,7 +11,12 @@ from typing import Dict, List
 import io
 import logging
 import sys
+import os
 from fixture_matcher import FixtureMatcher
+from load_env import load_env_file
+
+# Cargar variables de entorno al inicio
+load_env_file()
 
 # Configurar logging
 logging.basicConfig(
@@ -85,7 +90,7 @@ def process_csv_with_fixtures(df: pd.DataFrame, api_key: str) -> Dict:
     failed_matches = 0
     
     logger.info(f"Columnas disponibles en DataFrame: {list(df.columns)}")
-    
+
     for i, row in df.iterrows():
         try:
             match_text = str(row.get('Match text', '')).strip()
@@ -252,11 +257,14 @@ def main():
     st.sidebar.header("🔧 Configuración")
     
     # API Key
+    # Intentar cargar desde variable de entorno primero
+    default_api_key = os.getenv('RAPIDAPI_KEY', '')
+    
     api_key = st.sidebar.text_input(
         "🔑 API Key de RapidAPI",
-        value="d4b4999861mshc077d4879aba6d4p19f6e7jsn1bc73c757992",
+        value=default_api_key,
         type="password",
-        help="Tu API key de RapidAPI para API Football"
+        help="Tu API key de RapidAPI para API Football. También puedes configurarla como variable de entorno RAPIDAPI_KEY"
     )
     
     if not api_key:
@@ -371,7 +379,7 @@ def main():
             if st.session_state.get('processing_confirmed', False):
                 try:
                     logger.info("INICIANDO PROCESAMIENTO CONFIRMADO")
-                    with st.spinner("Procesando fixtures with API Football..."):
+                    with st.spinner("Procesando fixtures con API Football..."):
                         # Procesar con FixtureMatcher
                         processing_results = process_csv_with_fixtures(df, api_key)
                         
@@ -398,63 +406,63 @@ def main():
                         
                         with col4:
                             st.metric("🎯 Precisión", f"{summary['success_rate']:.1f}%")
+                        
+                        # Mostrar detalles de resultados exitosos
+                        successful_results = [r for r in processing_results['results'] if r['success']]
+                        if successful_results:
+                            st.subheader("✅ Fixtures Encontrados")
                             
-                            # Mostrar detalles de resultados exitosos
-                            successful_results = [r for r in processing_results['results'] if r['success']]
-                            if successful_results:
-                                st.subheader("✅ Fixtures Encontrados")
-                                
-                                success_data = []
-                                for result in successful_results[:10]:  # Mostrar solo los primeros 10
-                                    team_ids = result['team_ids']
-                                    success_data.append({
-                                        'Partido Original': result['original_text'],
-                                        'Local': f"{team_ids['home']['name']} (ID: {team_ids['home']['id']})",
-                                        'Visitante': f"{team_ids['away']['name']} (ID: {team_ids['away']['id']})",
-                                        'Fecha': result['match_info']['date']
-                                    })
-                                
-                                st.dataframe(pd.DataFrame(success_data), use_container_width=True)
-                                
-                                if len(successful_results) > 10:
-                                    st.write(f"... y {len(successful_results) - 10} resultados más")
+                            success_data = []
+                            for result in successful_results[:10]:  # Mostrar solo los primeros 10
+                                team_ids = result['team_ids']
+                                success_data.append({
+                                    'Partido Original': result['original_text'],
+                                    'Local': f"{team_ids['home']['name']} (ID: {team_ids['home']['id']})",
+                                    'Visitante': f"{team_ids['away']['name']} (ID: {team_ids['away']['id']})",
+                                    'Fecha': result['match_info']['date']
+                                })
                             
-                            # Mostrar errores si los hay
-                            failed_results = [r for r in processing_results['results'] if not r['success']]
-                            if failed_results:
-                                st.subheader("❌ Partidos No Encontrados")
-                                
-                                error_data = []
-                                for result in failed_results[:10]:
-                                    error_data.append({
-                                        'Partido Original': result.get('original_text', 'N/A'),
-                                        'Error': result.get('error', 'Unknown error')
-                                    })
-                                
-                                st.dataframe(pd.DataFrame(error_data), use_container_width=True)
+                            st.dataframe(pd.DataFrame(success_data), use_container_width=True)
                             
-                            # Crear y descargar archivo Excel
-                            st.header("💾 Descargar Resultados")
+                            if len(successful_results) > 10:
+                                st.write(f"... y {len(successful_results) - 10} resultados más")
+                        
+                        # Mostrar errores si los hay
+                        failed_results = [r for r in processing_results['results'] if not r['success']]
+                        if failed_results:
+                            st.subheader("❌ Partidos No Encontrados")
                             
-                            try:
-                                excel_data = create_excel_with_fixture_ids(df, processing_results)
-                                
-                                st.download_button(
-                                    label="📥 Descargar Excel con IDs de Fixtures",
-                                    data=excel_data,
-                                    file_name="equipos_fixture_based.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                                
-                                # Descargar resultados JSON
-                                results_json = json.dumps(processing_results, indent=2, ensure_ascii=False, default=str)
-                                st.download_button(
-                                    label="📥 Descargar Resultados JSON",
-                                    data=results_json,
-                                    file_name="resultados_fixture_based.json",
-                                    mime="application/json"
-                                )
-                                
+                            error_data = []
+                            for result in failed_results[:10]:
+                                error_data.append({
+                                    'Partido Original': result.get('original_text', 'N/A'),
+                                    'Error': result.get('error', 'Unknown error')
+                                })
+                            
+                            st.dataframe(pd.DataFrame(error_data), use_container_width=True)
+                        
+                        # Crear y descargar archivo Excel
+                        st.header("💾 Descargar Resultados")
+                        
+                        try:
+                            excel_data = create_excel_with_fixture_ids(df, processing_results)
+                            
+                            st.download_button(
+                                label="📥 Descargar Excel con IDs de Fixtures",
+                                data=excel_data,
+                                file_name="equipos_fixture_based.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                            
+                            # Descargar resultados JSON
+                            results_json = json.dumps(processing_results, indent=2, ensure_ascii=False, default=str)
+                            st.download_button(
+                                label="📥 Descargar Resultados JSON",
+                                data=results_json,
+                                file_name="resultados_fixture_based.json",
+                                mime="application/json"
+                            )
+                            
                             st.markdown("""
                             <div class="success-box">
                             <h4>🎉 ¡Procesamiento Completado!</h4>
